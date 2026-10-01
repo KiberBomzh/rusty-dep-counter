@@ -29,14 +29,18 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 
+run: $(TARGET)
+	./$(TARGET)
+
+
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)
 
 
-rebuild: clean all
+rebuild: clean $(TARGET)
 
 
 -include $(DEPS)
 
 
-.PHONY: all clean rebuild
+.PHONY: all clean rebuild run
