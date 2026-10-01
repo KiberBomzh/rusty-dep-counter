@@ -4,5 +4,5 @@
 
 
 int main(void) {
-	count("https://flibusta.is");
+	count("fb2epub", 0);
 }
