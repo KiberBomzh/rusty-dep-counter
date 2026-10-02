@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 #include "cJSON.h"
 #include <curl/curl.h>
@@ -32,13 +33,73 @@ size_t write_chunk_callback(void *contents, size_t size, size_t nmemb, void *use
 	return realsize;
 }
 
+CURLcode get(CURL *curl, struct StringWSize *s, char const *url) {
+	s->mem = malloc(1);
+	s->size = 0;
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)s);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_chunk_callback);
+
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	return curl_easy_perform(curl);
+}
+
+
+
+struct Dependency {
+	struct Crate *crate;
+	char *crate_id;
+	char *required_version;
+	bool optional;
+};
+struct Crate {
+	char *name;
+	char *version;
+	struct Dependency *dependencies;
+	size_t dependencies_len;
+};
+void free_crate(struct Crate *crate) {
+	if (crate == NULL)
+		return;
+
+	for (size_t i = 0; i < crate->dependencies_len; i++) {
+		struct Dependency *d = crate->dependencies + i;
+
+		free_crate(d->crate);
+		free(d->crate_id);
+		free(d->required_version);
+	}
+	free(crate->dependencies);
+
+	free(crate->version);
+	free(crate->name);
+}
+void print_crate(struct Crate *crate) {
+	if (crate == NULL)
+		return;
+
+	printf("Name: %s, version: %s\n\n", crate->name, crate->version);
+
+	printf("Dependencies: (%zd)\n", crate->dependencies_len);
+	for (size_t i = 0; i< crate->dependencies_len; i++) {
+		struct Dependency *d = crate->dependencies + i;
+
+		printf("Dep-name: %s, req-version: %s, optional: %s\n",
+			d->crate_id,
+			d->required_version,
+			d->optional ? "true" : "false"
+		);
+
+		print_crate(d->crate);
+	}
+}
 
 const char *BASE_URL = "https://crates.io";
 const char *CRATES_API_URL = "api/v1/crates";
 
 void build_dep_url(char **url, char const *crate_name, char const *version);
+int get_crate(CURL *curl, struct Crate **crate, char const *crate_name, int depth);
 void get_version(char **version, CURL *curl, char const *crate_name);
-int check_crate(CURL *curl, char const *url, int dep);
+int get_dependencies(CURL *curl, char const *url, struct Dependency **deps, size_t *deps_len);
 
 
 int count(char const *crate_name, int depth) { // depth - how deep count dependencies
@@ -54,27 +115,14 @@ int count(char const *crate_name, int depth) { // depth - how deep count depende
 	curl_easy_setopt(curl, CURLOPT_USERAGENT, "rusty-dep-counter");
 
 
-	char *version = NULL;
-	get_version(&version, curl, crate_name);
-	if (version == NULL) {
-		fprintf(stderr, "Cannot get version for %s!\n", crate_name);
+	struct Crate *crate = NULL;
+	if ( get_crate(curl, &crate, crate_name, depth) ) {
 		goto err;
 	}
-
-	char *url = NULL;
-	build_dep_url(&url, crate_name, version);
-	if (url == NULL) {
-		fprintf(stderr, "Cannot build deps url for %s!\n", crate_name);
-		free(version);
-		goto err;
-	}
-	if ( check_crate(curl, url, depth) ) {
-		free(version);
-		free(url);
-		goto err;
-	}
+	print_crate(crate);
 
 
+	free_crate(crate);
 	curl_easy_cleanup(curl);
 	curl_global_cleanup();
 	return 0;
@@ -87,18 +135,52 @@ err:
 }
 
 
-CURLcode get(CURL *curl, struct StringWSize *s, char const *url) {
-	s->mem = malloc(1);
-	s->size = 0;
-	curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)s);
-	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_chunk_callback);
+int get_crate(CURL *curl, struct Crate **crate, char const *crate_name, int depth) {
+	*crate = malloc(sizeof(struct Crate));
+	char *name = strdup(crate_name);
 
-	curl_easy_setopt(curl, CURLOPT_URL, url);
-	return curl_easy_perform(curl);
+	char *version = NULL;
+	get_version(&version, curl, name);
+	if (version == NULL) {
+		fprintf(stderr, "Cannot get version for %s!\n", name);
+		return 1;
+	}
+
+	char *url = NULL;
+	build_dep_url(&url, name, version);
+	if (url == NULL) {
+		fprintf(stderr, "Cannot build deps url for %s!\n", name);
+		free(version);
+		return 1;
+	}
+
+	struct Dependency *deps = NULL;
+	size_t deps_len = 0;
+	if ( get_dependencies(curl, url, &deps, &deps_len) ) {
+		free(url);
+		free(version);
+		return 1;
+	}
+	free(url);
+
+	(*crate)->name = name;
+	(*crate)->version = version;
+	(*crate)->dependencies = deps;
+	(*crate)->dependencies_len = deps_len;
+
+	if (depth > 0) {
+		for (size_t i = 0; i < deps_len; i++) {
+			struct Dependency *d = deps + i;
+			get_crate(curl, &d->crate, d->crate_id, depth - 1);
+		}
+	}
+
+
+	return 0;
 }
 
 
-int check_crate(CURL *curl, char const *url, int depth) {
+int get_dependencies(CURL *curl, char const *url, struct Dependency **deps, size_t *deps_len) {
 	struct StringWSize s;
 	CURLcode result = get(curl, &s, url);
 	if (result != CURLE_OK) {
@@ -118,14 +200,32 @@ int check_crate(CURL *curl, char const *url, int depth) {
 	}
 
 	cJSON *dep_obj = NULL;
-	unsigned int total = 0;
+	int total_deps = cJSON_GetArraySize(deps_obj);
+	struct Dependency *dependencies = malloc( total_deps * sizeof(struct Dependency) );
+
+	int current_dep = 0;
 	cJSON_ArrayForEach(dep_obj, deps_obj) {
+		struct Dependency *dependency = dependencies + current_dep;
+		current_dep++;
+
+		dependency->crate = NULL;
+
 		cJSON *name_obj = cJSON_GetObjectItem(dep_obj, "crate_id");
-		char const *name = cJSON_GetStringValue(name_obj);
-		printf("%s\n", name);
-		total++;
+		char const *n = cJSON_GetStringValue(name_obj);
+		dependency->crate_id = strdup(n);
+
+		cJSON *version_obj = cJSON_GetObjectItem(dep_obj, "req");
+		char const *v = cJSON_GetStringValue(version_obj);
+		dependency->required_version = strdup(v);
+
+		cJSON *optional_obj = cJSON_GetObjectItem(dep_obj, "optional");
+		bool opt = cJSON_IsTrue(optional_obj);
+		dependency->optional = opt;
+
 	}
-	printf("Depth: %d, Total: %d\n", depth, total);
+
+	*deps = dependencies;
+	*deps_len = total_deps;
 
 
 	cJSON_Delete(json);
