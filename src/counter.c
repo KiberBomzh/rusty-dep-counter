@@ -140,8 +140,8 @@ err:
 
 void get_version(char **version, CURL *curl, char const *crate_name) {
 	char *url;
-	asprintf(&url, "%s/%s/%s", BASE_URL, CRATES_API_URL, crate_name);
-	if (url == NULL) {
+	int r = asprintf(&url, "%s/%s/%s", BASE_URL, CRATES_API_URL, crate_name);
+	if (r == -1) {
 		return;
 	}
 
@@ -183,5 +183,7 @@ end:
 
 
 void build_dep_url(char **url, char const *crate_name, char const *version) {
-	asprintf(url, "%s/%s/%s/%s/dependencies", BASE_URL, CRATES_API_URL, crate_name, version);
+	int result = asprintf(url, "%s/%s/%s/%s/dependencies", BASE_URL, CRATES_API_URL, crate_name, version);
+	if (result == -1)
+		*url = NULL;
 }
