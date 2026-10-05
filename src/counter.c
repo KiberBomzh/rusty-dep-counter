@@ -115,7 +115,7 @@ void print_crate(struct Crate *crate) {
 	printf("Name: %s, version: %s\n\n", crate->name, crate->version);
 
 	printf("Dependencies: (%zd)\n", crate->dependencies_len);
-	for (size_t i = 0; i< crate->dependencies_len; i++) {
+	for (size_t i = 0; i < crate->dependencies_len; i++) {
 		struct Dependency *d = crate->dependencies + i;
 
 		printf("Dep-name: %s, req-version: %s, optional: %s\n",
@@ -127,13 +127,24 @@ void print_crate(struct Crate *crate) {
 		print_crate(d->crate);
 	}
 }
+void count_dependencies(struct Crate *crate, size_t *counter) {
+	if (crate == NULL)
+		return;
+
+	for (size_t i = 0; i < crate->dependencies_len; i++) {
+		struct Dependency *d = crate->dependencies + i;
+		count_dependencies(d->crate, counter);
+		*counter = *counter + 1;
+	}
+}
 
 const char *BASE_URL = "https://crates.io";
 const char *CRATES_API_URL = "api/v1/crates";
 
 void build_dep_url(char **url, char const *crate_name, char const *version);
-int get_crate(CURL *curl, struct Crate **crate, char const *crate_name, int depth);
-void get_version(char **version, CURL *curl, char const *crate_name);
+int get_crate(CURL *curl, struct Crate **crate, char const *crate_name, char const *version, int depth);
+void get_default_version(char **version, CURL *curl, char const *crate_name);
+void get_version(char **version, char const *required_version);
 int get_dependencies(CURL *curl, char const *url, struct Dependency **deps, size_t *deps_len);
 
 
@@ -151,10 +162,14 @@ int count(char const *crate_name, int depth) { // depth - how deep count depende
 
 
 	struct Crate *crate = NULL;
-	if ( get_crate(curl, &crate, crate_name, depth) ) {
+	if ( get_crate(curl, &crate, crate_name, NULL, depth) ) {
 		goto err;
 	}
+	size_t deps_total = 0;
+	count_dependencies(crate, &deps_total);
+
 	print_crate(crate);
+	printf("Dependencies total: %zd\n", deps_total);
 
 
 	free_crate(crate);
@@ -170,12 +185,25 @@ err:
 }
 
 
-int get_crate(CURL *curl, struct Crate **crate, char const *crate_name, int depth) {
+int get_crate(
+	CURL *curl,
+	struct Crate **crate,
+	char const *crate_name,
+	char const *crate_version,
+	int depth
+) {
 	*crate = malloc(sizeof(struct Crate));
 	char *name = strdup(crate_name);
 
 	char *version = NULL;
-	get_version(&version, curl, name);
+	if (crate_version == NULL) {
+		get_default_version(&version, curl, name);
+	} else {
+		get_version(&version, crate_version);
+		if (version == NULL)
+			get_default_version(&version, curl, name);
+	}
+
 	if (version == NULL) {
 		fprintf(stderr, "Cannot get version for %s!\n", name);
 		return 1;
@@ -206,7 +234,7 @@ int get_crate(CURL *curl, struct Crate **crate, char const *crate_name, int dept
 	if (depth > 0) {
 		for (size_t i = 0; i < deps_len; i++) {
 			struct Dependency *d = deps + i;
-			get_crate(curl, &d->crate, d->crate_id, depth - 1);
+			get_crate(curl, &d->crate, d->crate_id, d->required_version, depth - 1);
 		}
 	}
 
@@ -273,7 +301,7 @@ err:
 }
 
 
-void get_version(char **version, CURL *curl, char const *crate_name) {
+void get_default_version(char **version, CURL *curl, char const *crate_name) {
 	char *url;
 	int r = asprintf(&url, "%s/%s/%s", BASE_URL, CRATES_API_URL, crate_name);
 	if (r == -1) {
@@ -314,6 +342,45 @@ void get_version(char **version, CURL *curl, char const *crate_name) {
 end:
 	cJSON_Delete(json);
 	free(s.mem);
+}
+
+void get_version(char **version, char const *required_version) {
+	if (required_version == NULL)
+		return;
+
+	size_t rv_len = strlen(required_version);
+	if (rv_len < 1)
+		return;
+
+	char *rv = strdup(required_version);
+	char *v = rv;
+	if (*required_version == '^') {
+		if (rv_len > 1)
+			v++;
+		else
+			return;
+	}
+
+	char *major = strtok(v, ".");
+	if (major == NULL) {
+		free(rv);
+		return;
+	}
+	
+	char *minor = strtok(NULL, ".");
+	if (minor == NULL)
+		minor = "0";
+
+	char *patch = strtok(NULL, ".");
+	if (patch == NULL)
+		patch = "0";
+
+
+	int result = asprintf(version, "%s.%s.%s", major, minor, patch);
+	if (result == -1)
+		*version = NULL;
+
+	free(rv);
 }
 
 
