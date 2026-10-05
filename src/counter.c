@@ -44,6 +44,7 @@ CURLcode get(CURL *curl, struct StringWSize *s, char const *url) {
 
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	rate_limit_wait();
+	fprintf(stderr, "Getting %s...\n", url);
 	return curl_easy_perform(curl);
 }
 
