@@ -4,5 +4,5 @@
 
 
 int main(void) {
-	count("fb2epub", 0);
+	count("fb2epub", 1);
 }

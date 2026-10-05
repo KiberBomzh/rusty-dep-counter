@@ -4,6 +4,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <time.h>
+#include <errno.h>
 
 #include "cJSON.h"
 #include <curl/curl.h>
@@ -33,6 +35,7 @@ size_t write_chunk_callback(void *contents, size_t size, size_t nmemb, void *use
 	return realsize;
 }
 
+void rate_limit_wait();
 CURLcode get(CURL *curl, struct StringWSize *s, char const *url) {
 	s->mem = malloc(1);
 	s->size = 0;
@@ -40,7 +43,39 @@ CURLcode get(CURL *curl, struct StringWSize *s, char const *url) {
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_chunk_callback);
 
 	curl_easy_setopt(curl, CURLOPT_URL, url);
+	rate_limit_wait();
 	return curl_easy_perform(curl);
+}
+
+struct timespec last_requested_time = {0, 0};
+bool first_request = true;
+void rate_limit_wait() {
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	if (first_request) {
+		first_request = false;
+		last_requested_time = now;
+		return;
+	}
+
+
+	double elapsed = (now.tv_sec - last_requested_time.tv_sec)
+		+ (now.tv_nsec - last_requested_time.tv_nsec) / 1e9;
+
+	if (elapsed < 1.0) {
+		double remaining = 1.0 - elapsed;
+		struct timespec sleep_ts;
+		sleep_ts.tv_sec = (time_t)remaining;
+		sleep_ts.tv_nsec = (long)((remaining - (time_t)remaining) * 1e9);
+
+		while (nanosleep(&sleep_ts, &sleep_ts) == -1 && errno == EINTR) {
+		}
+
+		clock_gettime(CLOCK_MONOTONIC, &now);
+	}
+
+	last_requested_time = now;
 }
 
 
